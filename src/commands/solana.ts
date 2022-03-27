@@ -3,8 +3,8 @@ import {
 	PaginationResolver,
 	PaginationType,
 } from "@discordx/pagination";
-import { CommandInteraction, MessageEmbed } from "discord.js";
-import { Discord, Slash, SlashChoice, SlashOption } from "discordx";
+import { CommandInteraction, MessageActionRow, MessageButton, MessageEmbed } from "discord.js";
+import { ButtonComponent, Discord, Slash, SlashChoice, SlashOption } from "discordx";
 import { CollectionResponse, ConversionResponse, Error, CollectionList  } from "../types";
 import { MagicDen } from "../services/MagicDen.js";
 import { default_image, mintColor, sidebarColor, blueColor } from "../config.js";
@@ -61,6 +61,7 @@ export abstract class Group {
 		address: string,
 		interaction: CommandInteraction
 	): Promise<void> {
+		await interaction.deferReply();
 		try {
 			const result = await Api.getTokens(address);
 
@@ -71,11 +72,11 @@ export abstract class Group {
 				title: name,
 				image: { url: image },
 				// description: "0",
-			}).setColor(mintColor);
-			embed.setURL(externalUrl);
-			embed.addField("Collection", collection);
-			embed.addField("Owner", owner);
-			await interaction.reply({ embeds: [embed] });
+			}).setColor(mintColor)
+			embed.setURL(externalUrl)
+			embed.addField("Collection", collection)
+			embed.addField("Owner", owner)
+			await interaction.editReply({ embeds: [embed] });
 		} catch (error) {
 			await showError("Something went wrong", interaction);
 		}
@@ -91,22 +92,40 @@ export abstract class Group {
 	): Promise<void> {
 		try {
 			const result = await Api.getTokenListing(address);
-
+			
 			if (await checkError(result as Error, interaction)) return;
+			let listed = false
 			if (result.length == 0) {
 				await showError(
 					"No Listing available for this token",
 					interaction
 				);
 				return;
+			}else{
+				listed = true
 			}
+			const tokenDetails = await Api.getTokens(address);
+			const { name, collection, image, externalUrl, owner } = tokenDetails;
 			const { seller, price } = result[0];
 			const embed = new MessageEmbed({
-				title: `Listings for ${formatAddress(address)}`,
-			}).setColor(mintColor);
-			embed.addField("Seller", seller);
-			embed.addField("Price", price.toString() + " SOL");
-			await interaction.reply({ embeds: [embed] });
+				title: listed?`Listings for ${formatAddress(address)}`:name,
+			}).setColor(mintColor)
+			.setImage(image||default_image)
+			.setFooter({text:`${name} | ${collection} | ${owner}`})
+			.setColor(mintColor)
+			.setURL(externalUrl)
+			.addFields([
+				{name:"Collection",value:collection},
+				{name:"Owner",value:owner},
+			])
+			if (listed){
+				embed.addFields([
+					{name:"Price",value:`${price} SOL`},
+					{name:"Seller",value:seller},
+				])
+			}
+			const actionRow = GetActionRow("Buy on Magic Eden",`https://magiceden.io/item-details/${address}`)
+			await interaction.reply({ embeds: [embed] ,components:[actionRow]});
 		} catch (error) {
 			console.log(error);
 			await showError("Something went wrong", interaction);
@@ -125,22 +144,24 @@ export abstract class Group {
 			const result = await Api.getCollectionStats(symbol);
 
 			if (await checkError(result as Error, interaction)) return;
-			if (result.length == 0) {
+			if (!result.listedCount || !result.floorPrice ||!result.avgPrice24hr || !result.volumeAll) {
 				await showError(
 					"Symbol must be written wrong!",
 					interaction
 				);
 				return;
 			}
-			const { floorPrice, listedCount, volumeAll, avgPrice24hr } = result[0];
+			const { floorPrice, listedCount, volumeAll, avgPrice24hr } = result;
 			const embed = new MessageEmbed({
 				title: `Floor Price of ${symbol}`,
-			}).setColor(blueColor);
-			embed.addField("Floor Price", floorPrice.toString() + " SOL");
-			embed.addField("Total Listings", listedCount.toString());
-			embed.addField("24hr Average Price", avgPrice24hr.toString() + " SOL");
-			embed.addField("Total Volume Traded", volumeAll.toString() + " SOL");
-			await interaction.reply({ embeds: [embed] });
+			}).setColor(blueColor)
+			.addField("Floor Price", floorPrice.toString() + " SOL")
+			.addField("Total Listings", listedCount.toString())
+			.addField("24hr Average Price", avgPrice24hr.toString() + " SOL")
+			.addField("Total Volume Traded", volumeAll.toString() + " SOL")
+			
+			const messageRow = GetActionRow("Buy on Magic Eden",`https://magiceden.io/marketplace/${symbol}`);
+			await interaction.reply({ embeds: [embed],components: [messageRow] });
 		} catch (error) {
 			console.log(error);
 			await showError("No listings available for this collection.", interaction);
@@ -291,19 +312,16 @@ export abstract class Group {
 		@SlashOption("symbol", {
 			description: "Collection Symbol",
 			required: true,
-			// minValue: 0, maxValue:500
 		})
 		symbol: string,
 		@SlashOption("limit", {
 			description: "Limit",
 			required: false,
-			// minValue: 0, maxValue:500
 		})
 		limit: number,
 		@SlashOption("offset", {
 			description: "offset",
 			required: false,
-			//	minValue: 0,	maxValue:500
 		})
 		offset: number,
 		interaction: CommandInteraction
@@ -337,7 +355,30 @@ export abstract class Group {
 					.addField("Price", col.price.toString() + " SOL")
 					.setColor(blueColor);
 			});
-			const pagination = new Pagination(interaction, pages, {
+			const resolver = new PaginationResolver(
+				async(page:number,pagination:Pagination)=>{
+					const col = cols[page];
+					const token = await Api.getTokens(col.tokenMint);
+					return new MessageEmbed()
+					.setFooter({
+						text: `Listing ${page} of ${
+							offset == 0
+								? cols.length
+								: `${offset - 1}-${offset + cols.length}`
+						}`,
+					})
+					.setTitle(`**Listings of ${symbol}**`)
+					.addField("Mint Address", col.tokenMint)
+					.addField("Seller", col.seller)
+					.addField("Price", col.price.toString() + " SOL")
+					.addField(`${token.name} `, `[Buy on Magic Eden](https://magiceden.io/item-details/${col.tokenMint})`)
+					.setImage(token.image||default_image)
+					.setColor(blueColor)
+					
+				}	
+		,cols.length
+			)
+			const pagination = new Pagination(interaction, resolver, {
 				type:
 					limit > 10
 						? PaginationType.SelectMenu
@@ -399,4 +440,11 @@ export abstract class Group {
 		}
 	}
 }
-0
+
+function GetActionRow(label:string,link: string) {
+	const button = new MessageButton({ label: label, url: link, style: "LINK" });
+
+	const messageRow = new MessageActionRow().addComponents(button);
+	return messageRow;
+}
+
